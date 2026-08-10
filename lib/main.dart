@@ -1,9 +1,22 @@
 import 'package:flutter/material.dart';
+import 'package:flutter_dotenv/flutter_dotenv.dart';
 
 import 'screens/configurar_ruta_page.dart';
 import 'screens/mis_rutas_page.dart';
 
-void main() {
+void main() async {
+  // 1. Asegura que el motor de Flutter esté listo
+  WidgetsFlutterBinding.ensureInitialized();
+  
+  // 2. Escudo protector: Intenta cargar el .env, pero si falla, no congela la app
+  try {
+    await dotenv.load(fileName: ".env");
+    print("✅ Bóveda .env cargada con éxito");
+  } catch (e) {
+    print("🚨 ERROR: No se pudo cargar el .env. Detalles: $e");
+  }
+
+  // 3. Arranca la aplicación sí o sí
   runApp(const RutaFacilApp());
 }
 

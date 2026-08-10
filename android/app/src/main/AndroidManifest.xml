@@ -6,9 +6,9 @@
         android:label="ruta_facil"
         android:name="${applicationName}"
         android:icon="@mipmap/ic_launcher">
-        <meta-data
-            android:name="com.google.android.geo.API_KEY"
-            android:value="AIzaSyByB_TymA280p5CkkUe38itZEwm6DvDmXA" />
+    <meta-data
+        android:name="com.google.android.geo.API_KEY"
+        android:value="${mapsApiKey}" />
         <activity
             android:name=".MainActivity"
             android:exported="true"
