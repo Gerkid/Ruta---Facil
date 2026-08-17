@@ -1,5 +1,5 @@
 import java.util.Properties
-import java.io.FileInputStream
+import org.jetbrains.kotlin.gradle.tasks.KotlinCompile
 import org.jetbrains.kotlin.gradle.dsl.JvmTarget
 
 plugins {
@@ -18,8 +18,6 @@ if (localPropertiesFile.exists()) {
 
 val flutterVersionCode = localProperties.getProperty("flutter.versionCode")?.toInt() ?: 1
 val flutterVersionName = localProperties.getProperty("flutter.versionName") ?: "1.0"
-
-// 👇 EXTRAEMOS LA CLAVE DE TU BÓVEDA
 val mapsApiKey = localProperties.getProperty("google_maps_api_key") ?: ""
 
 android {
@@ -28,8 +26,9 @@ android {
     ndkVersion = flutter.ndkVersion
 
     compileOptions {
-        sourceCompatibility = JavaVersion.VERSION_1_8
-        targetCompatibility = JavaVersion.VERSION_1_8
+        isCoreLibraryDesugaringEnabled = true
+        sourceCompatibility = JavaVersion.VERSION_17
+        targetCompatibility = JavaVersion.VERSION_17
     }
 
     defaultConfig {
@@ -39,25 +38,29 @@ android {
         versionCode = flutterVersionCode
         versionName = flutterVersionName
         
-        // 👇 INYECTAMOS LA CLAVE AL MANIFEST
         manifestPlaceholders["mapsApiKey"] = mapsApiKey
     }
 
     buildTypes {
         release {
-            // TODO: Add your own signing config for the release build.
             signingConfig = signingConfigs.getByName("debug")
+            // 🛡️ DESACTIVAR OFUSCACIÓN: Evita que R8 elimine librerías al compilar el APK
+            isMinifyEnabled = false
+            isShrinkResources = false
         }
-    }
-}
-
-// 👇 SOLUCIÓN: Forzamos la salida a Java 1.8 usando tu Java actual
-kotlin {
-    compilerOptions {
-        jvmTarget.set(JvmTarget.JVM_1_8)
     }
 }
 
 flutter {
     source = "../.."
+}
+
+dependencies {
+    coreLibraryDesugaring("com.android.tools:desugar_jdk_libs:2.1.4")
+}
+
+tasks.withType<KotlinCompile>().configureEach {
+    compilerOptions {
+        jvmTarget.set(JvmTarget.JVM_17)
+    }
 }

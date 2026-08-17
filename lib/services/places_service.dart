@@ -1,4 +1,5 @@
 import 'dart:convert';
+import 'package:flutter/foundation.dart';
 import 'package:http/http.dart' as http;
 import 'package:flutter_dotenv/flutter_dotenv.dart';
 
@@ -30,21 +31,13 @@ class PlaceDetails {
 }
 
 class PlacesService {
-  // 🚨 CLAVE PROTEGIDA: Ahora se lee desde el archivo .env
-  // Si el archivo falla, devolverá un string vacío para evitar que la app crashee.
   static String get apiKey => dotenv.env['GOOGLE_API_KEY'] ?? '';
-
   final LocalDatabase _database = LocalDatabase.instance;
 
-Future<List<PlaceSuggestion>> buscarLugares(
-    String texto,
-  ) async {
-    if (texto.trim().length < 3) {
-      return [];
-    }
-
-    // 👇 1er CHIVATO: Verifica si la clave llega a la función
-    print('🔍 TEST: Leyendo clave del .env -> "$apiKey"'); 
+  /// Búsqueda predictiva de direcciones (Autocomplete)
+  Future<List<PlaceSuggestion>> buscarLugares(String texto) async {
+    if (texto.trim().length < 3) return [];
+    if (apiKey.isEmpty) return [];
 
     final uri = Uri.parse(
       'https://maps.googleapis.com/maps/api/place/autocomplete/json'
@@ -55,24 +48,10 @@ Future<List<PlaceSuggestion>> buscarLugares(
     );
 
     try {
-      final response = await http
-          .get(uri)
-          .timeout(const Duration(seconds: 10));
-
-      // 👇 2do CHIVATO: Imprime la respuesta exacta de los servidores de Google
-      print('📡 RESPUESTA GOOGLE: ${response.body}'); 
-
-      if (response.statusCode != 200) {
-        throw Exception('Error de conexión con Google Places');
-      }
-
+      final response = await http.get(uri).timeout(const Duration(seconds: 10));
       final data = jsonDecode(response.body);
 
-      if (data['status'] != 'OK' && data['status'] != 'ZERO_RESULTS') {
-        // 👇 3er CHIVATO: Imprime si Google nos denegó el acceso
-        print('🚨 ERROR DE GOOGLE PLACES: ${data['status']} - ${data['error_message']}');
-        throw Exception('Google Places: ${data['status']}');
-      }
+      if (data['status'] != 'OK' && data['status'] != 'ZERO_RESULTS') return [];
 
       final predictions = data['predictions'] as List? ?? [];
       return predictions.map((item) {
@@ -81,24 +60,19 @@ Future<List<PlaceSuggestion>> buscarLugares(
           descripcion: item['description'],
         );
       }).toList();
-    } catch (e) {
-      print('🚨 EXCEPCIÓN EN BUSCAR LUGARES: $e');
+    } catch (_) {
       return [];
     }
   }
 
-  Future<PlaceDetails?> obtenerDetalles(
-    String placeId,
-  ) async {
-    final ubicacionGuardada =
-        await _database.buscarUbicacionPorPlaceId(
-      placeId,
-    );
+  /// Obtiene detalles de un lugar seleccionado
+  Future<PlaceDetails?> obtenerDetalles(String placeId) async {
+    final ubicacionGuardada = await _database.buscarUbicacionPorPlaceId(placeId);
 
     if (ubicacionGuardada != null) {
       return PlaceDetails(
         placeId: ubicacionGuardada.placeId ?? placeId,
-        nombre: ubicacionGuardada.nombre,
+        nombre: ubicacionGuardada.direccion,
         latitud: ubicacionGuardada.latitud,
         longitud: ubicacionGuardada.longitud,
       );
@@ -107,60 +81,138 @@ Future<List<PlaceSuggestion>> buscarLugares(
     final uri = Uri.parse(
       'https://maps.googleapis.com/maps/api/place/details/json'
       '?place_id=${Uri.encodeComponent(placeId)}'
-      '&fields=place_id,name,geometry'
+      '&fields=place_id,name,geometry,formatted_address'
       '&language=es'
       '&key=$apiKey',
     );
 
-    final response = await http
-        .get(uri)
-        .timeout(const Duration(seconds: 10));
+    try {
+      final response = await http.get(uri).timeout(const Duration(seconds: 10));
+      if (response.statusCode != 200) return null;
 
-    if (response.statusCode != 200) {
-      throw Exception(
-        'Error obteniendo los detalles del lugar',
+      final data = jsonDecode(response.body);
+      if (data['status'] != 'OK' || data['result'] == null) return null;
+
+      final result = data['result'];
+      final location = result['geometry']['location'];
+
+      final detalles = PlaceDetails(
+        placeId: result['place_id'] ?? placeId,
+        nombre: result['formatted_address'] ?? result['name'] ?? 'Lugar sin nombre',
+        latitud: (location['lat'] as num).toDouble(),
+        longitud: (location['lng'] as num).toDouble(),
       );
-    }
 
-    final data = jsonDecode(response.body);
-
-    if (data['status'] != 'OK') {
-      throw Exception(
-        'Google Places: ${data['status']}',
+      await _database.guardarUbicacion(
+        Parada(
+          direccion: detalles.nombre,
+          latitud: detalles.latitud,
+          longitud: detalles.longitud,
+          placeId: detalles.placeId,
+        ),
       );
-    }
 
-    final result = data['result'];
-
-    if (result == null) {
+      return detalles;
+    } catch (_) {
       return null;
     }
-
-    final location = result['geometry']['location'];
-
-    final detalles = PlaceDetails(
-      placeId: result['place_id'],
-      nombre: result['name'] ?? 'Lugar sin nombre',
-      latitud: (location['lat'] as num).toDouble(),
-      longitud: (location['lng'] as num).toDouble(),
-    );
-
-    // Guardar la ubicación en nuestra base local.
-    await _database.guardarUbicacion(
-      Parada(
-        nombre: detalles.nombre,
-        latitud: detalles.latitud,
-        longitud: detalles.longitud,
-        placeId: detalles.placeId,
-      ),
-    );
-
-    return detalles;
   }
 
-  /// Reverse geocoding: convierte coordenadas en una dirección
-  /// legible, usando el mismo Google Maps que ya usamos para
-  /// buscar direcciones (mismo crédito, sin costo aparte).
+  /// Geocodificación Inteligente con Doble Motor (Geocoding + Places Text Search)
+  Future<PlaceDetails?> geocodificarTexto(String direccionTexto) async {
+    final limpio = direccionTexto.trim();
+    if (limpio.isEmpty) return null;
+
+    // Asegurar contexto de Perú
+    final direccionConsulta = limpio.toLowerCase().contains('peru') || limpio.toLowerCase().contains('perú')
+        ? limpio
+        : '$limpio, Perú';
+
+    try {
+      // 1. INTENTO PRIMARIO: Geocoding API tradicional
+      final uriGeocode = Uri.parse(
+        'https://maps.googleapis.com/maps/api/geocode/json'
+        '?address=${Uri.encodeComponent(direccionConsulta)}'
+        '&components=country:pe'
+        '&language=es'
+        '&key=$apiKey',
+      );
+
+      final respGeocode = await http.get(uriGeocode).timeout(const Duration(seconds: 8));
+      if (respGeocode.statusCode == 200) {
+        final data = jsonDecode(respGeocode.body);
+        final resultados = data['results'] as List? ?? [];
+
+        if (data['status'] == 'OK' && resultados.isNotEmpty) {
+          final primero = resultados.first;
+          final location = primero['geometry']['location'];
+
+          final detalles = PlaceDetails(
+            placeId: primero['place_id'] ?? '',
+            nombre: primero['formatted_address'] ?? limpio,
+            latitud: (location['lat'] as num).toDouble(),
+            longitud: (location['lng'] as num).toDouble(),
+          );
+
+          if (detalles.placeId.isNotEmpty) {
+            await _database.guardarUbicacion(
+              Parada(
+                direccion: detalles.nombre,
+                latitud: detalles.latitud,
+                longitud: detalles.longitud,
+                placeId: detalles.placeId,
+              ),
+            );
+          }
+          return detalles;
+        }
+      }
+
+      // 2. FALLBACK SECUNDARIO: Google Places Text Search (Encuentra calles y avenidas aunque la numeración falle)
+      final uriPlaces = Uri.parse(
+        'https://maps.googleapis.com/maps/api/place/textsearch/json'
+        '?query=${Uri.encodeComponent(direccionConsulta)}'
+        '&language=es'
+        '&key=$apiKey',
+      );
+
+      final respPlaces = await http.get(uriPlaces).timeout(const Duration(seconds: 8));
+      if (respPlaces.statusCode == 200) {
+        final dataPlaces = jsonDecode(respPlaces.body);
+        final resultadosPlaces = dataPlaces['results'] as List? ?? [];
+
+        if (dataPlaces['status'] == 'OK' && resultadosPlaces.isNotEmpty) {
+          final primero = resultadosPlaces.first;
+          final location = primero['geometry']['location'];
+
+          final detalles = PlaceDetails(
+            placeId: primero['place_id'] ?? '',
+            nombre: primero['formatted_address'] ?? primero['name'] ?? limpio,
+            latitud: (location['lat'] as num).toDouble(),
+            longitud: (location['lng'] as num).toDouble(),
+          );
+
+          if (detalles.placeId.isNotEmpty) {
+            await _database.guardarUbicacion(
+              Parada(
+                direccion: detalles.nombre,
+                latitud: detalles.latitud,
+                longitud: detalles.longitud,
+                placeId: detalles.placeId,
+              ),
+            );
+          }
+          return detalles;
+        }
+      }
+    } catch (e) {
+      debugPrint('🚨 Error en geocodificación de $limpio: $e');
+    }
+
+    return null;
+  }
+
+  /// Reverse geocoding
   Future<PlaceDetails?> obtenerDireccionDesdeCoordenadas({
     required double latitud,
     required double longitud,
@@ -172,58 +224,27 @@ Future<List<PlaceSuggestion>> buscarLugares(
       '&key=$apiKey',
     );
 
-    final response = await http
-        .get(uri)
-        .timeout(const Duration(seconds: 10));
+    try {
+      final response = await http.get(uri).timeout(const Duration(seconds: 10));
+      if (response.statusCode != 200) return null;
 
-    if (response.statusCode != 200) {
-      throw Exception(
-        'Error obteniendo la dirección de esas coordenadas',
+      final data = jsonDecode(response.body);
+      if (data['status'] != 'OK') return null;
+
+      final resultados = data['results'] as List? ?? [];
+      if (resultados.isEmpty) return null;
+
+      final primero = resultados.first;
+      final location = primero['geometry']['location'];
+
+      return PlaceDetails(
+        placeId: primero['place_id'] ?? '',
+        nombre: primero['formatted_address'] ?? 'Ubicación actual',
+        latitud: (location['lat'] as num).toDouble(),
+        longitud: (location['lng'] as num).toDouble(),
       );
-    }
-
-    final data = jsonDecode(response.body);
-
-    if (data['status'] == 'ZERO_RESULTS') {
+    } catch (_) {
       return null;
     }
-
-    if (data['status'] != 'OK') {
-      throw Exception(
-        'Google Maps: ${data['status']}',
-      );
-    }
-
-    final resultados = data['results'] as List? ?? [];
-
-    if (resultados.isEmpty) {
-      return null;
-    }
-
-    final primero = resultados.first;
-    final location = primero['geometry']['location'];
-
-    final detalles = PlaceDetails(
-      placeId: primero['place_id'] ?? '',
-      nombre: primero['formatted_address'] ??
-          'Dirección encontrada',
-      latitud: (location['lat'] as num).toDouble(),
-      longitud: (location['lng'] as num).toDouble(),
-    );
-
-    // Guardamos también esta ubicación para no volver a
-    // consultarla si se repite.
-    if (detalles.placeId.isNotEmpty) {
-      await _database.guardarUbicacion(
-        Parada(
-          nombre: detalles.nombre,
-          latitud: detalles.latitud,
-          longitud: detalles.longitud,
-          placeId: detalles.placeId,
-        ),
-      );
-    }
-
-    return detalles;
   }
 }
